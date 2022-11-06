@@ -124,10 +124,7 @@ void handleOtherCommand(parseResult* result) {
   }
   case 0: {
     // in child process
-    char* cmd;
-    asprintf(&cmd, "%s%s", "/bin/", command);
-    // an array of {cmd, ...args, NULL}
-    argv[0] = cmd;
+    argv[0] = command;
     if (argCount > 1) {
       int i;
       for (i = 0; i < argCount; i++){
@@ -138,9 +135,8 @@ void handleOtherCommand(parseResult* result) {
         }
       }
     }
-
-    execv(argv[0], argv);
-    perror("execv error\n");
+    execvp(command, argv);
+    perror("execvp error\n");
     exit(1);
     break;
   }
