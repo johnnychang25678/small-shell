@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <stdbool.h>
 
 #define PARSE_DELIMITER " "
 
@@ -28,7 +29,8 @@ void replaceString(char* input, char* replaceLocation,
 typedef struct parseResult {
   int argCount; // the total arg count, include the command
   char *command;
-  char* *args;
+  char **args;
+  bool isForeGround;
 } parseResult;
 
 parseResult* parseInput(char* input){
@@ -77,12 +79,18 @@ parseResult* parseInput(char* input){
   }
   result->argCount = counter; 
   result->args = args;
+  result->isForeGround = true;
 
-  printf("result.command %s\n", result->command);
-  int i;
-  for (i = 0; i < counter - 1; i++) {
-    printf("index: %d, arg: %s\n", i, result->args[i]);
-  }
+  // if last arg input is "&", the process should run in background
+  // we need to remove it from args and set isForeGround to false
+  if (counter >= 2) {
+    char* lastArg = args[counter - 2];
+    if (strcmp(lastArg, "&") == 0) {
+      result->isForeGround = false;
+      result->argCount--;
+      lastArg = NULL;
+    } 
+  } 
 
   return result;
 }
@@ -107,23 +115,36 @@ void handleBuiltInCommand(parseResult* result) {
   // TODO: handle status
 }
 
+void myHandler(int sigNo) {
+    pid_t result;
+    int status;
+    if (sigNo != 1) {
+    }
+    while((result = waitpid(-1, &status, WNOHANG)) > 0) {
+      printf("aaa");
+      sleep(1);
+    };
+}
+
 void handleOtherCommand(parseResult* result) {
   char* command = result->command;
   // fork a child
   pid_t spawnPid = fork();
   int childStatus;
-
   int argCount = result->argCount;
   char **argv = malloc(sizeof(char*) * (argCount + 1)); // +1 is for NULL
 
-  switch(spawnPid){
+
+  switch(spawnPid) {
   case -1: {
     perror("fork error\n");
+    free(argv);
     exit(1);
     break;
   }
   case 0: {
     // in child process
+    // generate argv to pass in execvp
     argv[0] = command;
     if (argCount > 1) {
       int i;
@@ -136,34 +157,61 @@ void handleOtherCommand(parseResult* result) {
       }
     }
     execvp(command, argv);
-    perror("execvp error\n");
+    perror(command);
+    fflush(stdout);
+    free(argv);
     exit(1);
+
     break;
   }
-  default:
+  default: 
     // in parent process, wait for child termination
-    waitpid(spawnPid, &childStatus, 0);
-    printf("after wait...\n");
+    if (result->isForeGround == true) {
+      waitpid(spawnPid, &childStatus, 0);
+    } else {
+      printf("background pid is %d\n", spawnPid); 
+      waitpid(spawnPid, &childStatus, WNOHANG);
+    }
     free(argv);
+   
   }
+
 }
+
+void checkBgProcess() {
+    pid_t backgroundPid;
+    int status;
+
+    while((backgroundPid = waitpid(-1, &status, WNOHANG)) > 0) {
+      printf("background pid %d is done: ", backgroundPid);
+      fflush(stdout);
+      if (WIFEXITED(status)) {
+        printf("exit value %d\n", WEXITSTATUS(status));
+      } else {
+        printf("terminated by signal %d\n", WTERMSIG(status));
+      }
+      fflush(stdout);
+    }
+}
+
 
 int main(){
   while (1) {
-    printf("Hello world\n"); 
-    fflush(stdout);
+    checkBgProcess();
+    printf(": "); 
     char *line = NULL;
     size_t len = 0;
 
-    // parseResult result;
     getline(&line, &len, stdin);
-    if (line[0] != ':') continue;
-    if (line[1] != ' ') continue;
-    char *lineCopy;
-    lineCopy = line + 2; 
+
+    if (line[0] == '#' || line[0] == '\n' || line[0] == ' ') {
+      free(line);
+      continue;
+    }
     parseResult* result = NULL;
-    result = parseInput(lineCopy);
+    result = parseInput(line);
     // TODO: do stuff with commands and args
+
     char* command = result->command;
     if (strcmp(command, "exit") == 0 || strcmp(command, "cd") == 0 || strcmp(command, "status") == 0) {
       handleBuiltInCommand(result);
@@ -171,7 +219,6 @@ int main(){
 
     // handle non-builtin
     handleOtherCommand(result);
-
 
     // clean up the memory
     free(result->command);
