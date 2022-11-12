@@ -6,6 +6,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <error.h>
 
 #define PARSE_DELIMITER " "
 
@@ -27,28 +29,39 @@ void replaceString(char* input, char* replaceLocation,
 
 
 typedef struct parseResult {
-  int argCount; // the total arg count, include the command
   char *command;
   char **args;
+  char **redirects;
+  char **fileNames;
+  char *fileName;
   bool isForeGround;
+  int argCount; // the total arg count, include the command
+  int fileCount;
+  int redirectCount;
 } parseResult;
 
 parseResult* parseInput(char* input){
-  // split input by space (strok)
   parseResult* result = malloc(4096);
-  const char* expandSymbol = "$$";
-  const int expSymbolLen = strlen(expandSymbol);
 
   // remove the trailing new line character
   input[strcspn(input, "\n")] = 0;
 
   int counter = 0;
+  int fileCount = 0;
+  int redirectCount = 0;
   char **args = malloc(sizeof(char*)); // [char*, char*, ...]
-  char *token = strtok(input, PARSE_DELIMITER);
+  char **fileNames = malloc(sizeof(char*)); // [char*, char*, ...]
+  char **redirects = malloc(sizeof(char*)); // [char*, char*, ...]
+  bool isFile = false;
+
+  char *token = strtok(input, PARSE_DELIMITER); // split input by space (strok)
+  
   while (token) {
     char *needle = strstr(token, "$$");
     if (needle != NULL) {
       // replace $$ with pid string
+      const char* expandSymbol = "$$";
+      const int expSymbolLen = strlen(expandSymbol);
       pid_t pid = getpid();
       char pidString[10];
       sprintf(pidString, "%d", pid);
@@ -64,13 +77,38 @@ parseResult* parseInput(char* input){
        result->command = malloc(sizeof(char) * (strlen(token) + 1));
        strcpy(result->command, token);
     } else {
-      if (counter >= 1) {
-        args = realloc(args, counter * sizeof(char*)); 
+      if (strcmp(token, ">") == 0 || strcmp(token, "<") == 0) {
+        redirectCount++;
+        if (redirectCount > 1) {
+          redirects = realloc(redirects, redirectCount * sizeof(char*));
+        }
+        redirects[redirectCount-1] = malloc(sizeof(char)+1); // only store "<" or ">"
+        strcpy(redirects[redirectCount - 1], token);
+        isFile = false;
       }
-      args[counter - 1] = malloc(sizeof(char) * (strlen(token) + 1));
-      strcpy(args[counter-1], token);
-      // printf("index: %d, element: %s\n", counter - 1, token);
+
+      if (isFile) {
+        fileCount++;
+        if (fileCount > 1) {
+          fileNames = realloc(fileNames, fileCount * sizeof(char*)); 
+        }
+        fileNames[fileCount-1] = malloc(sizeof(char) * (strlen(token)+1));
+        strcpy(fileNames[fileCount - 1], token);
+        result->fileName = token;
+        isFile = false;
+      }
       
+      if (redirectCount > 0) {
+        // next argument is file, so we set isFile = true, then conitune
+        isFile = true; 
+        counter--;
+      } else {
+        if (counter >= 1) {
+          args = realloc(args, counter * sizeof(char*)); 
+        }
+        args[counter - 1] = malloc(sizeof(char) * (strlen(token) + 1));
+        strcpy(args[counter-1], token);
+      }
     }
     
     counter++;
@@ -78,7 +116,11 @@ parseResult* parseInput(char* input){
     token = strtok(NULL, PARSE_DELIMITER);
   }
   result->argCount = counter; 
+  result->fileCount = fileCount;
+  result->redirectCount = redirectCount;
   result->args = args;
+  result->fileNames = fileNames;
+  result->redirects = redirects;
   result->isForeGround = true;
 
   // if last arg input is "&", the process should run in background
@@ -144,18 +186,45 @@ void handleOtherCommand(parseResult* result) {
   }
   case 0: {
     // in child process
+    int fd;
+    // redirectCount should == fileCount
+    int redirectCount = result->redirectCount;
+
+    for (int i = 0; i < redirectCount; i++) {
+      char* symbol = result->redirects[i];
+      if (strcmp(symbol, ">") == 0) {
+        fd = open(result->fileNames[i], O_WRONLY | O_CREAT, 0644);
+        if (fd == -1) {
+          perror("cannot open file");
+          exit(1);
+        }
+        dup2(fd, STDOUT_FILENO);
+      } else if (strcmp(symbol, "<") == 0) {
+        fd = open(result->fileNames[i], O_RDONLY, 0644);
+        if (fd == -1) {
+          perror("cannot open file");
+          exit(1);
+        }
+        dup2(fd, STDIN_FILENO);
+      }
+
+    }
+
+
     // generate argv to pass in execvp
     argv[0] = command;
     if (argCount > 1) {
       int i;
       for (i = 0; i < argCount; i++){
         if (i == argCount - 1) {
-          argv[i+1] = NULL; 
+          argv[i+1] = NULL; // last argument is NULL for argv
         } else {
           argv[i+1] = result->args[i];
         }
       }
     }
+    
+
     execvp(command, argv);
     perror(command);
     fflush(stdout);
@@ -211,7 +280,7 @@ int main(){
     parseResult* result = NULL;
     result = parseInput(line);
     // TODO: do stuff with commands and args
-
+    
     char* command = result->command;
     if (strcmp(command, "exit") == 0 || strcmp(command, "cd") == 0 || strcmp(command, "status") == 0) {
       handleBuiltInCommand(result);
@@ -221,9 +290,14 @@ int main(){
     handleOtherCommand(result);
 
     // clean up the memory
+    // TODO: clean up redirects and files
     free(result->command);
     for (int i = 0; i < result->argCount - 1; i++) {
       free(result->args[i]);
+    }
+    for (int i = 0; i < result->fileCount; i++) {
+      free(result->redirects[i]);
+      free(result->fileNames[i]);
     }
     free(result);
     free(line);
