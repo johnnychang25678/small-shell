@@ -8,27 +8,44 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <error.h>
-#include <errno.h>
 #include <signal.h>
 
 #define PARSE_DELIMITER " "
 
-// global vars
+/* 
+ * Global variables
+ * isForeGroundOnlyMode: Indicates whether smallsh is foreground-only mode or not
+ * lastForeGroundStatus: The last foreground process's exit value, user can use status command 
+ *  to check this value.
+ */
 volatile sig_atomic_t isForeGroundOnlyMode = 0;
 int lastForeGroundStatus = 0;
 
+/*
+ * Structure to store all the information needed from parsing user input.
+ * command: command from the user, e.g., ls
+ * args: the arguments from the user, e.g., -al
+ * redirects: stores the ">" or "<" symbols for input/output redirection 
+ * fileNames: stores the file names when user wants to redirect input/output
+ * isForeGround: a boolean that indicates if the user wants to run foreground process or background process
+ * argCount: total argument count, include the command, therefore the minimum is 1
+ * fileCount: total file count, could be 0 if the user is not redirecting
+ * redirectCount: count of the ">" and "<" symbols, could be 0 if the user isn't redirecting
+ * */
 typedef struct parseResult {
   char *command;
   char **args;
-  char **redirects;
-  char **fileNames;
+  char **redirects; 
+  char **fileNames; 
   bool isForeGround;
-  int argCount; // the total arg count, include the command
-  int fileCount;
+  int argCount;
+  int fileCount; 
   int redirectCount;
 } parseResult;
 
-// a helper function to replace chars in a  string
+/* 
+ * a helper function to replace chars in a string 
+ * */
 void replaceString(char* input, char* replaceLocation, 
     int replaceLength, char* replaceTo, int replaceToLength, char* output){
   int firstPartLength = replaceLocation - input;
@@ -42,13 +59,16 @@ void replaceString(char* input, char* replaceLocation,
   strcpy(p, input); // copy the last part to result
 }
 
-// parst the input from the user
+/*
+ * Function that takes user input and returns parseResult* 
+ */
 parseResult* parseInput(char* input){
   parseResult* result = malloc(4096);
 
   // remove the trailing new line character
   input[strcspn(input, "\n")] = 0;
 
+  // initializeing all the variables
   int counter = 0;
   int fileCount = 0;
   int redirectCount = 0;
@@ -57,13 +77,13 @@ parseResult* parseInput(char* input){
   char **redirects = malloc(sizeof(char*));
   bool isFile = false;
 
-  // split input by space (strok)
+  // split input by space 
   char *token = strtok(input, PARSE_DELIMITER);   
   
   while (token) {
     char *needle = strstr(token, "$$");
+    // replace $$ with pid string
     if (needle != NULL) {
-      // replace $$ with pid string
       const char* expandSymbol = "$$";
       const int expSymbolLen = strlen(expandSymbol);
       pid_t pid = getpid();
@@ -77,10 +97,12 @@ parseResult* parseInput(char* input){
       strcpy(token, output);
     }
     
+    // counter == 0, meaning it's the command, counter > 0 are the arguments
     if (counter == 0) {
        result->command = malloc(sizeof(char) * (strlen(token) + 1));
        strcpy(result->command, token);
     } else {
+      // handle ">" and "<" for redirection
       if (strcmp(token, ">") == 0 || strcmp(token, "<") == 0) {
         redirectCount++;
         if (redirectCount > 1) {
@@ -143,13 +165,15 @@ parseResult* parseInput(char* input){
   return result;
 }
 
+/* 
+ * Function to handle "cd", "exit", and "status" commands
+ * Takes parseResult* as argument
+ */
 void handleBuiltInCommand(parseResult* result) {
   char* command = result->command;
-  // handle exit
   if (strcmp(command, "exit") == 0) {
     exit(0);
   }
-  // handle cd
   if (strcmp(command, "cd") == 0) {
     char* path; 
     if (result->argCount == 1) {
@@ -158,9 +182,6 @@ void handleBuiltInCommand(parseResult* result) {
       path = result->args[0];
     }
     chdir(path);
-    // char buf[4096];
-    // getcwd(buf, 4096);
-    // printf("current path: %s\n", buf);
   }
   // The status command prints out either the exit status or 
   // the terminating signal of the last foreground process ran by your shell.
@@ -171,12 +192,14 @@ void handleBuiltInCommand(parseResult* result) {
 
 }
 
-pid_t spawnPid;
-
+/*
+ * Function to handle othe commands that are not built-in ones.
+ * Takes parseResult* as argument.
+ */
 void handleOtherCommand(parseResult* result) {
   char* command = result->command;
   // fork a child
-  spawnPid = fork();
+  pid_t spawnPid = fork();
   int childStatus;
   int argCount = result->argCount;
   char **argv = malloc(sizeof(char*) * (argCount + 1)); // +1 is for NULL
@@ -190,8 +213,14 @@ void handleOtherCommand(parseResult* result) {
     break;
   }
   case 0: {
-    // Child processes ignore SIGTSTP
-    // Foreground process should have default SIGINT handler
+    // All child processes ignore SIGTSTP
+    struct sigaction ignoreSigTstp = {0};
+    ignoreSigTstp.sa_handler = SIG_IGN;
+    ignoreSigTstp.sa_flags = 0;
+    sigfillset(&ignoreSigTstp.sa_mask);
+    sigaction(SIGTSTP, &ignoreSigTstp, NULL);
+    
+    // Foreground process handles SIGINT with default handler 
     if (result->isForeGround) {
       struct sigaction defaultSigInt = {0};
       defaultSigInt.sa_handler = SIG_DFL;
@@ -200,14 +229,9 @@ void handleOtherCommand(parseResult* result) {
       sigaction(SIGINT, &defaultSigInt, NULL);
     }  
     
-    struct sigaction ignoreSigTstp = {0};
-    ignoreSigTstp.sa_handler = SIG_IGN;
-    ignoreSigTstp.sa_flags = 0;
-    sigfillset(&ignoreSigTstp.sa_mask);
-    sigaction(SIGTSTP, &ignoreSigTstp, NULL);
 
 
-    // input and output redirects
+    // handle input and output redirects with dup2()
     int fd;
     int redirectCount = result->redirectCount;
 
@@ -241,7 +265,7 @@ void handleOtherCommand(parseResult* result) {
       int i;
       for (i = 0; i < argCount; i++){
         if (i == argCount - 1) {
-          argv[i+1] = NULL; // last argument is NULL for argv
+          argv[i+1] = NULL; 
         } else {
           argv[i+1] = result->args[i];
         }
@@ -275,6 +299,10 @@ void handleOtherCommand(parseResult* result) {
 
 }
 
+
+/*
+ * Function that check and priunt out the background process's status 
+ */
 void checkBgProcess() {
     pid_t backgroundPid;
     int status;
@@ -291,6 +319,10 @@ void checkBgProcess() {
     }
 }
 
+/*
+ * SIGTSTP handler function for main process. Toggoles the isForeGroundOnlyMode variable 
+ * upon receiving the signal.
+ */
 void sigStspHandler(int sigNo) {
   if (isForeGroundOnlyMode == 0) {
     isForeGroundOnlyMode = 1;
@@ -319,18 +351,22 @@ int main(){
   sigfillset(&ignoreSigInt.sa_mask);
   sigaction(SIGTSTP, &handleSigTstp, NULL);
   
+  // infinite loop that continues to fget user input
   while (1) {
     printf(": "); 
-    fflush(NULL);
+    fflush(stdout);
 
     char line[2048];
     char * readResult;
     if ((readResult = fgets(line, 2048, stdin)) == NULL) continue;
         
 
+    // ignore #, new line character, and empty input
     if (line[0] == '#' || line[0] == '\n' || line[0] == ' ') {
       continue;
     }
+
+    // parse the input and pass the parsed result to correspond functions
     parseResult* result = NULL;
     result = parseInput(line);
     
@@ -344,6 +380,7 @@ int main(){
       handleOtherCommand(result);
     }
 
+    // check background process status
     checkBgProcess();
 
     // clean up the memory
