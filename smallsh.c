@@ -1,3 +1,8 @@
+/*
+ * Author: Chia-Ming Chang
+ * Date: 2022/11/03
+ * Description: Implementation of a subset of features of well-known shells (e.g., bash)
+ */
 #define  _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -336,6 +341,10 @@ void sigStspHandler(int sigNo) {
 }
 
 
+/*
+ * The main function sets up signal handlers, gets and parse user inputs,
+ *  and execute commands accordingly.
+ */
 int main(){
   // main process and background process should ignore SIGINT
   struct sigaction ignoreSigInt = {0};
