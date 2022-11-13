@@ -8,11 +8,27 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <error.h>
+#include <errno.h>
+#include <signal.h>
 
 #define PARSE_DELIMITER " "
 
+// global vars
+volatile sig_atomic_t isForeGroundOnlyMode = 0;
+int lastForeGroundStatus = 0;
 
-// replace t 
+typedef struct parseResult {
+  char *command;
+  char **args;
+  char **redirects;
+  char **fileNames;
+  bool isForeGround;
+  int argCount; // the total arg count, include the command
+  int fileCount;
+  int redirectCount;
+} parseResult;
+
+// a helper function to replace chars in a  string
 void replaceString(char* input, char* replaceLocation, 
     int replaceLength, char* replaceTo, int replaceToLength, char* output){
   int firstPartLength = replaceLocation - input;
@@ -24,22 +40,9 @@ void replaceString(char* input, char* replaceLocation,
   input = replaceLocation + replaceLength; // move to the last part of the input
   p += replaceToLength; // move to the end of the output
   strcpy(p, input); // copy the last part to result
-
 }
 
-
-typedef struct parseResult {
-  char *command;
-  char **args;
-  char **redirects;
-  char **fileNames;
-  char *fileName;
-  bool isForeGround;
-  int argCount; // the total arg count, include the command
-  int fileCount;
-  int redirectCount;
-} parseResult;
-
+// parst the input from the user
 parseResult* parseInput(char* input){
   parseResult* result = malloc(4096);
 
@@ -49,12 +52,13 @@ parseResult* parseInput(char* input){
   int counter = 0;
   int fileCount = 0;
   int redirectCount = 0;
-  char **args = malloc(sizeof(char*)); // [char*, char*, ...]
-  char **fileNames = malloc(sizeof(char*)); // [char*, char*, ...]
-  char **redirects = malloc(sizeof(char*)); // [char*, char*, ...]
+  char **args = malloc(sizeof(char*)); 
+  char **fileNames = malloc(sizeof(char*)); 
+  char **redirects = malloc(sizeof(char*));
   bool isFile = false;
 
-  char *token = strtok(input, PARSE_DELIMITER); // split input by space (strok)
+  // split input by space (strok)
+  char *token = strtok(input, PARSE_DELIMITER);   
   
   while (token) {
     char *needle = strstr(token, "$$");
@@ -94,7 +98,6 @@ parseResult* parseInput(char* input){
         }
         fileNames[fileCount-1] = malloc(sizeof(char) * (strlen(token)+1));
         strcpy(fileNames[fileCount - 1], token);
-        result->fileName = token;
         isFile = false;
       }
       
@@ -125,12 +128,15 @@ parseResult* parseInput(char* input){
 
   // if last arg input is "&", the process should run in background
   // we need to remove it from args and set isForeGround to false
+  // but if isForeGroundOnlyMode = true, we set to false to ignore the bg process
   if (counter >= 2) {
     char* lastArg = args[counter - 2];
     if (strcmp(lastArg, "&") == 0) {
-      result->isForeGround = false;
       result->argCount--;
       lastArg = NULL;
+      if (isForeGroundOnlyMode == 0) {
+        result->isForeGround = false;
+      }
     } 
   } 
 
@@ -145,33 +151,32 @@ void handleBuiltInCommand(parseResult* result) {
   }
   // handle cd
   if (strcmp(command, "cd") == 0) {
-    char* path = result->args[0];
-    if (path == NULL) {
-      path = getenv("HOME");
+    char* path; 
+    if (result->argCount == 1) {
+      path = getenv("HOME"); 
+    } else {
+      path = result->args[0];
     }
     chdir(path);
-    char buf[4096];
-    getcwd(buf, 4096);
-    printf("current path: %s\n", buf);
+    // char buf[4096];
+    // getcwd(buf, 4096);
+    // printf("current path: %s\n", buf);
   }
-  // TODO: handle status
+  // The status command prints out either the exit status or 
+  // the terminating signal of the last foreground process ran by your shell.
+  if (strcmp(command, "status") == 0) {
+    printf("exit value %d\n", lastForeGroundStatus);
+    fflush(stdout);
+  }
+
 }
 
-void myHandler(int sigNo) {
-    pid_t result;
-    int status;
-    if (sigNo != 1) {
-    }
-    while((result = waitpid(-1, &status, WNOHANG)) > 0) {
-      printf("aaa");
-      sleep(1);
-    };
-}
+pid_t spawnPid;
 
 void handleOtherCommand(parseResult* result) {
   char* command = result->command;
   // fork a child
-  pid_t spawnPid = fork();
+  spawnPid = fork();
   int childStatus;
   int argCount = result->argCount;
   char **argv = malloc(sizeof(char*) * (argCount + 1)); // +1 is for NULL
@@ -185,15 +190,31 @@ void handleOtherCommand(parseResult* result) {
     break;
   }
   case 0: {
-    // in child process
+    // Child processes ignore SIGTSTP
+    // Foreground process should have default SIGINT handler
+    if (result->isForeGround) {
+      struct sigaction defaultSigInt = {0};
+      defaultSigInt.sa_handler = SIG_DFL;
+      defaultSigInt.sa_flags = 0;
+      sigfillset(&defaultSigInt.sa_mask);
+      sigaction(SIGINT, &defaultSigInt, NULL);
+    }  
+    
+    struct sigaction ignoreSigTstp = {0};
+    ignoreSigTstp.sa_handler = SIG_IGN;
+    ignoreSigTstp.sa_flags = 0;
+    sigfillset(&ignoreSigTstp.sa_mask);
+    sigaction(SIGTSTP, &ignoreSigTstp, NULL);
+
+
+    // input and output redirects
     int fd;
-    // redirectCount should == fileCount
     int redirectCount = result->redirectCount;
 
     for (int i = 0; i < redirectCount; i++) {
       char* symbol = result->redirects[i];
       if (strcmp(symbol, ">") == 0) {
-        fd = open(result->fileNames[i], O_WRONLY | O_CREAT, 0644);
+        fd = open(result->fileNames[i], O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1) {
           perror("cannot open file");
           exit(1);
@@ -202,7 +223,8 @@ void handleOtherCommand(parseResult* result) {
       } else if (strcmp(symbol, "<") == 0) {
         fd = open(result->fileNames[i], O_RDONLY, 0644);
         if (fd == -1) {
-          perror("cannot open file");
+          printf("cannot open %s for input\n", result->fileNames[i]);
+          fflush(stdout);
           exit(1);
         }
         dup2(fd, STDIN_FILENO);
@@ -213,7 +235,9 @@ void handleOtherCommand(parseResult* result) {
 
     // generate argv to pass in execvp
     argv[0] = command;
-    if (argCount > 1) {
+    if (argCount == 1) {
+      argv[1] = NULL;
+    } else if (argCount > 1) {
       int i;
       for (i = 0; i < argCount; i++){
         if (i == argCount - 1) {
@@ -224,25 +248,29 @@ void handleOtherCommand(parseResult* result) {
       }
     }
     
-
     execvp(command, argv);
     perror(command);
     fflush(stdout);
-    free(argv);
     exit(1);
 
     break;
   }
   default: 
     // in parent process, wait for child termination
-    if (result->isForeGround == true) {
+    if (result->isForeGround) {
       waitpid(spawnPid, &childStatus, 0);
+      if (WIFEXITED(childStatus)) {
+        lastForeGroundStatus = WEXITSTATUS(childStatus);
+      } else {
+        lastForeGroundStatus = WTERMSIG(childStatus);
+      }
     } else {
+      // background process will not blocking wait
       printf("background pid is %d\n", spawnPid); 
+      fflush(stdout);
       waitpid(spawnPid, &childStatus, WNOHANG);
     }
     free(argv);
-   
   }
 
 }
@@ -263,44 +291,74 @@ void checkBgProcess() {
     }
 }
 
+void sigStspHandler(int sigNo) {
+  if (isForeGroundOnlyMode == 0) {
+    isForeGroundOnlyMode = 1;
+    char *message = "\nEntering foreground-only mode (& is now ignored)\n";
+    write(STDOUT_FILENO, message, 51);
+  } else {
+    isForeGroundOnlyMode = 0;
+    char *message = "\nExiting foreground-only mode\n";
+    write(STDOUT_FILENO, message, 31);
+  }
+}
+
 
 int main(){
-  while (1) {
-    checkBgProcess();
-    printf(": "); 
-    char *line = NULL;
-    size_t len = 0;
+  // main process and background process should ignore SIGINT
+  struct sigaction ignoreSigInt = {0};
+  ignoreSigInt.sa_handler = SIG_IGN;
+  ignoreSigInt.sa_flags = 0;
+  sigfillset(&ignoreSigInt.sa_mask);
+  sigaction(SIGINT, &ignoreSigInt, NULL);
 
-    getline(&line, &len, stdin);
+  // SIGTSTP will toggle the "foreground-only mode"
+  struct sigaction handleSigTstp = {0};
+  handleSigTstp.sa_handler = sigStspHandler;
+  handleSigTstp.sa_flags = 0;
+  sigfillset(&ignoreSigInt.sa_mask);
+  sigaction(SIGTSTP, &handleSigTstp, NULL);
+  
+  while (1) {
+    printf(": "); 
+    fflush(NULL);
+
+    char line[2048];
+    char * readResult;
+    if ((readResult = fgets(line, 2048, stdin)) == NULL) continue;
+        
 
     if (line[0] == '#' || line[0] == '\n' || line[0] == ' ') {
-      free(line);
       continue;
     }
     parseResult* result = NULL;
     result = parseInput(line);
-    // TODO: do stuff with commands and args
     
     char* command = result->command;
-    if (strcmp(command, "exit") == 0 || strcmp(command, "cd") == 0 || strcmp(command, "status") == 0) {
+    if (strcmp(command, "exit") == 0 || 
+        strcmp(command, "cd") == 0 || 
+        strcmp(command, "status") == 0) {
       handleBuiltInCommand(result);
+    } else {
+      // handle non-builtin
+      handleOtherCommand(result);
     }
 
-    // handle non-builtin
-    handleOtherCommand(result);
+    checkBgProcess();
 
     // clean up the memory
-    // TODO: clean up redirects and files
     free(result->command);
     for (int i = 0; i < result->argCount - 1; i++) {
       free(result->args[i]);
-    }
+     }
     for (int i = 0; i < result->fileCount; i++) {
       free(result->redirects[i]);
       free(result->fileNames[i]);
     }
+    free(result->args);
+    free(result->redirects);
+    free(result->fileNames);
     free(result);
-    free(line);
   }
 }
 
