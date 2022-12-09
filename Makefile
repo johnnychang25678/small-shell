@@ -1,2 +1,2 @@
 all:
-	gcc -std=c99 -Wall -Wextra -Wpedantic -Werror -o smallsh smallsh.c
+	gcc -std=c99 -o smallsh smallsh.c
